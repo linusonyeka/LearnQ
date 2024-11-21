@@ -8,6 +8,10 @@
 (define-constant err-not-found (err u101))
 (define-constant err-already-exists (err u102))
 (define-constant err-insufficient-balance (err u103))
+(define-constant err-invalid-input (err u104))
+(define-constant max-reward-amount u1000000) ;; Maximum tokens that can be rewarded
+(define-constant min-reward-amount u1) ;; Minimum tokens that can be rewarded
+(define-constant empty-title u"")
 
 ;; Data Variables
 (define-data-var token-name (string-ascii 32) "LEARN")
@@ -27,11 +31,40 @@
     reward-claimed: bool
 })
 
+;; Private Functions for Input Validation
+(define-private (validate-title (title (string-utf8 100)))
+    (let
+        ((title-length (len title)))
+        (and
+            (>= title-length u1)  ;; Title must not be empty
+            (<= title-length u100) ;; Title must not exceed max length
+            (not (is-eq title empty-title))  ;; Compare with UTF-8 empty string constant
+        )
+    )
+)
+
+(define-private (validate-reward (reward uint))
+    (and
+        (>= reward min-reward-amount)
+        (<= reward max-reward-amount)
+    )
+)
+
+(define-private (validate-course-id (course-id uint))
+    (and
+        (> course-id u0)
+        (is-none (get-course course-id))
+    )
+)
+
 ;; Public Functions
 (define-public (create-course (course-id uint) (title (string-utf8 100)) (reward uint))
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (asserts! (is-none (get-course course-id)) err-already-exists)
+        (asserts! (validate-course-id course-id) err-already-exists)
+        (asserts! (validate-title title) err-invalid-input)
+        (asserts! (validate-reward reward) err-invalid-input)
+        
         (ok (map-set courses course-id {
             title: title,
             reward: reward,
@@ -46,6 +79,7 @@
         (progress-key {user: tx-sender, course-id: course-id})
     )
         (asserts! (get active course) err-not-found)
+        (asserts! (> course-id u0) err-invalid-input)
         (asserts! (not (get completed (default-to 
             {completed: false, reward-claimed: false} 
             (map-get? user-progress progress-key)
@@ -64,13 +98,19 @@
         (course (unwrap! (get-course course-id) err-not-found))
         (progress-key {user: tx-sender, course-id: course-id})
         (progress (unwrap! (map-get? user-progress progress-key) err-not-found))
+        (reward-amount (get reward course))
     )
+        (asserts! (> course-id u0) err-invalid-input)
         (asserts! (get completed progress) err-not-found)
         (asserts! (not (get reward-claimed progress)) err-already-exists)
+        (asserts! (validate-reward reward-amount) err-invalid-input)
         
+        ;; Update progress first
         (map-set user-progress progress-key 
             (merge progress {reward-claimed: true}))
-        (mint-tokens tx-sender (get reward course))
+        
+        ;; Then mint tokens
+        (mint-tokens tx-sender reward-amount)
     )
 )
 
@@ -91,6 +131,10 @@
 (define-private (mint-tokens (recipient principal) (amount uint))
     (begin
         (try! (is-owner))
+        (asserts! (validate-reward amount) err-invalid-input)
+        (asserts! (<= (+ (var-get total-supply) amount) 
+                     (pow u10 u18)) err-insufficient-balance)
+        
         (map-set balances 
             recipient 
             (+ (get-balance recipient) amount))
