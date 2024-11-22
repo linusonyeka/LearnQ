@@ -1,30 +1,210 @@
+;; LearnQ - Educational Platform Smart Contract
+;; This contract manages the learning platform's core functionality
+;; including course completion tracking and token rewards
 
-;; title: playtoearn
-;; version:
-;; summary:
-;; description:
+;; Constants
+(define-constant contract-owner tx-sender)
+(define-constant err-owner-only (err u100))
+(define-constant err-not-found (err u101))
+(define-constant err-already-exists (err u102))
+(define-constant err-insufficient-balance (err u103))
+(define-constant err-invalid-input (err u104))
+(define-constant err-inactive-course (err u105))
+(define-constant err-no-changes (err u106))  ;; New error constant
+(define-constant max-reward-amount u1000000) ;; Maximum tokens that can be rewarded
+(define-constant min-reward-amount u1) ;; Minimum tokens that can be rewarded
+(define-constant empty-title u"")
 
-;; traits
-;;
+;; Data Variables
+(define-data-var token-name (string-ascii 32) "LEARN")
+(define-data-var token-symbol (string-ascii 10) "LRN")
+(define-data-var token-uri (optional (string-utf8 256)) none)
+(define-data-var total-supply uint u0)
 
-;; token definitions
-;;
+;; Data Maps
+(define-map balances principal uint)
+(define-map courses uint {
+    title: (string-utf8 100),
+    reward: uint,
+    active: bool
+})
+(define-map user-progress (tuple (user principal) (course-id uint)) {
+    completed: bool,
+    reward-claimed: bool
+})
 
-;; constants
-;;
+;; Private Functions for Input Validation
+(define-private (validate-title (title (string-utf8 100)))
+    (let
+        ((title-length (len title)))
+        (and
+            (>= title-length u1)  ;; Title must not be empty
+            (<= title-length u100) ;; Title must not exceed max length
+            (not (is-eq title empty-title))  ;; Compare with UTF-8 empty string constant
+        )
+    )
+)
 
-;; data vars
-;;
+(define-private (validate-reward (reward uint))
+    (and
+        (>= reward min-reward-amount)
+        (<= reward max-reward-amount)
+    )
+)
 
-;; data maps
-;;
+(define-private (validate-course-id (course-id uint))
+    (and
+        (> course-id u0)
+        (is-none (get-course course-id))
+    )
+)
 
-;; public functions
-;;
+;; Public Functions
+(define-public (create-course (course-id uint) (title (string-utf8 100)) (reward uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (validate-course-id course-id) err-already-exists)
+        (asserts! (validate-title title) err-invalid-input)
+        (asserts! (validate-reward reward) err-invalid-input)
+        
+        (ok (map-set courses course-id {
+            title: title,
+            reward: reward,
+            active: true
+        }))
+    )
+)
 
-;; read only functions
-;;
+;; New function to update course details
+(define-public (update-course (course-id uint) (new-title (optional (string-utf8 100))) (new-reward (optional uint)))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+        (current-title (get title course))
+        (current-reward (get reward course))
+        (final-title (default-to current-title new-title))
+        (final-reward (default-to current-reward new-reward))
+    )
+        ;; Verify caller is contract owner
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        
+        ;; Validate course ID
+        (asserts! (> course-id u0) err-invalid-input)
+        
+        ;; Validate new title if provided
+        (asserts! (or 
+            (is-none new-title)
+            (validate-title (unwrap! new-title err-invalid-input))
+        ) err-invalid-input)
+        
+        ;; Validate new reward if provided
+        (asserts! (or
+            (is-none new-reward)
+            (validate-reward (unwrap! new-reward err-invalid-input))
+        ) err-invalid-input)
+        
+        ;; Verify that at least one field is being updated
+        (asserts! (or
+            (is-some new-title)
+            (is-some new-reward)
+        ) err-no-changes)
+        
+        ;; Update the course with new values
+        (ok (map-set courses course-id {
+            title: final-title,
+            reward: final-reward,
+            active: (get active course)
+        }))
+    )
+)
 
-;; private functions
-;;
+;; Function to toggle course activation status
+(define-public (toggle-course-status (course-id uint))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> course-id u0) err-invalid-input)
+        
+        (ok (map-set courses course-id 
+            (merge course {active: (not (get active course))})
+        ))
+    )
+)
 
+(define-public (complete-course (course-id uint))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+        (progress-key {user: tx-sender, course-id: course-id})
+    )
+        (asserts! (get active course) err-inactive-course)
+        (asserts! (> course-id u0) err-invalid-input)
+        (asserts! (not (get completed (default-to 
+            {completed: false, reward-claimed: false} 
+            (map-get? user-progress progress-key)
+        ))) err-already-exists)
+        
+        (map-set user-progress progress-key {
+            completed: true,
+            reward-claimed: false
+        })
+        (ok true)
+    )
+)
+
+(define-public (claim-reward (course-id uint))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+        (progress-key {user: tx-sender, course-id: course-id})
+        (progress (unwrap! (map-get? user-progress progress-key) err-not-found))
+        (reward-amount (get reward course))
+    )
+        (asserts! (> course-id u0) err-invalid-input)
+        (asserts! (get completed progress) err-not-found)
+        (asserts! (not (get reward-claimed progress)) err-already-exists)
+        (asserts! (validate-reward reward-amount) err-invalid-input)
+        
+        ;; Update progress first
+        (map-set user-progress progress-key 
+            (merge progress {reward-claimed: true}))
+        
+        ;; Then mint tokens
+        (mint-tokens tx-sender reward-amount)
+    )
+)
+
+;; Read-Only Functions
+(define-read-only (get-course (course-id uint))
+    (map-get? courses course-id)
+)
+
+(define-read-only (get-user-progress (user principal) (course-id uint))
+    (map-get? user-progress {user: user, course-id: course-id})
+)
+
+(define-read-only (get-balance (account principal))
+    (default-to u0 (map-get? balances account))
+)
+
+;; Private Functions
+(define-private (mint-tokens (recipient principal) (amount uint))
+    (begin
+        (try! (is-owner))
+        (asserts! (validate-reward amount) err-invalid-input)
+        (asserts! (<= (+ (var-get total-supply) amount) 
+                     (pow u10 u18)) err-insufficient-balance)
+        
+        (map-set balances 
+            recipient 
+            (+ (get-balance recipient) amount))
+        (var-set total-supply 
+            (+ (var-get total-supply) amount))
+        (ok true)
+    )
+)
+
+(define-private (is-owner)
+    (if (is-eq tx-sender contract-owner)
+        (ok true)
+        err-owner-only
+    )
+)
