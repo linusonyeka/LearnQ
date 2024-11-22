@@ -9,6 +9,7 @@
 (define-constant err-already-exists (err u102))
 (define-constant err-insufficient-balance (err u103))
 (define-constant err-invalid-input (err u104))
+(define-constant err-inactive-course (err u105))  ;; New error constant
 (define-constant max-reward-amount u1000000) ;; Maximum tokens that can be rewarded
 (define-constant min-reward-amount u1) ;; Minimum tokens that can be rewarded
 (define-constant empty-title u"")
@@ -73,12 +74,27 @@
     )
 )
 
+;; New function to toggle course activation status
+(define-public (toggle-course-status (course-id uint))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> course-id u0) err-invalid-input)
+        
+        (ok (map-set courses course-id 
+            (merge course {active: (not (get active course))})
+        ))
+    )
+)
+
+;; Updated complete-course function to check for active status
 (define-public (complete-course (course-id uint))
     (let (
         (course (unwrap! (get-course course-id) err-not-found))
         (progress-key {user: tx-sender, course-id: course-id})
     )
-        (asserts! (get active course) err-not-found)
+        (asserts! (get active course) err-inactive-course)  ;; New check for active status
         (asserts! (> course-id u0) err-invalid-input)
         (asserts! (not (get completed (default-to 
             {completed: false, reward-claimed: false} 
