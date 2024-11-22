@@ -9,7 +9,8 @@
 (define-constant err-already-exists (err u102))
 (define-constant err-insufficient-balance (err u103))
 (define-constant err-invalid-input (err u104))
-(define-constant err-inactive-course (err u105))  ;; New error constant
+(define-constant err-inactive-course (err u105))
+(define-constant err-no-changes (err u106))  ;; New error constant
 (define-constant max-reward-amount u1000000) ;; Maximum tokens that can be rewarded
 (define-constant min-reward-amount u1) ;; Minimum tokens that can be rewarded
 (define-constant empty-title u"")
@@ -74,7 +75,49 @@
     )
 )
 
-;; New function to toggle course activation status
+;; New function to update course details
+(define-public (update-course (course-id uint) (new-title (optional (string-utf8 100))) (new-reward (optional uint)))
+    (let (
+        (course (unwrap! (get-course course-id) err-not-found))
+        (current-title (get title course))
+        (current-reward (get reward course))
+        (final-title (default-to current-title new-title))
+        (final-reward (default-to current-reward new-reward))
+    )
+        ;; Verify caller is contract owner
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        
+        ;; Validate course ID
+        (asserts! (> course-id u0) err-invalid-input)
+        
+        ;; Validate new title if provided
+        (asserts! (or 
+            (is-none new-title)
+            (validate-title (unwrap! new-title err-invalid-input))
+        ) err-invalid-input)
+        
+        ;; Validate new reward if provided
+        (asserts! (or
+            (is-none new-reward)
+            (validate-reward (unwrap! new-reward err-invalid-input))
+        ) err-invalid-input)
+        
+        ;; Verify that at least one field is being updated
+        (asserts! (or
+            (is-some new-title)
+            (is-some new-reward)
+        ) err-no-changes)
+        
+        ;; Update the course with new values
+        (ok (map-set courses course-id {
+            title: final-title,
+            reward: final-reward,
+            active: (get active course)
+        }))
+    )
+)
+
+;; Function to toggle course activation status
 (define-public (toggle-course-status (course-id uint))
     (let (
         (course (unwrap! (get-course course-id) err-not-found))
@@ -88,13 +131,12 @@
     )
 )
 
-;; Updated complete-course function to check for active status
 (define-public (complete-course (course-id uint))
     (let (
         (course (unwrap! (get-course course-id) err-not-found))
         (progress-key {user: tx-sender, course-id: course-id})
     )
-        (asserts! (get active course) err-inactive-course)  ;; New check for active status
+        (asserts! (get active course) err-inactive-course)
         (asserts! (> course-id u0) err-invalid-input)
         (asserts! (not (get completed (default-to 
             {completed: false, reward-claimed: false} 
